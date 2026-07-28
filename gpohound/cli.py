@@ -42,6 +42,22 @@ class GPOHoundCLI:
 
         console.print(f"Output written to {zip_path}")
 
+    def save_bundle_zip(self, bundle, output_dir, zip_name):
+        """
+        Write multiple named JSON entries into a single zip file
+        bundle: dict of {filename: data}
+        """
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        zip_path = output_path / zip_name
+
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for filename, data in bundle.items():
+                json_bytes = json.dumps(data, indent=4, default=str).encode("utf-8")
+                zf.writestr(filename, json_bytes)
+
+        console.print(f"Output written to {zip_path}")
+
     def parse_gpo_file(self, file_path):
         """
         Dump a single GPO file

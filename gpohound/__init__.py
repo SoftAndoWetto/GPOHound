@@ -223,6 +223,15 @@ def main():
         nargs="+",
     )
 
+    # Full command (SYSVOL + LDAP + dump + analysis, bundled into one zip)
+    full = subparsers.add_parser(
+        "full", parents=[verbosity_parent, auth_parent],
+        help="Download SYSVOL+LDAP, dump and analyse, and zip it all into one file"
+    )
+    full.add_argument("--output-dir", type=str, default=".", metavar="DIR", help="Folder to write the zip to")
+    full.add_argument("--zip-name", type=str, default="gpohound_full.zip", help="Name of the output zip file")
+    full.add_argument("--ldaps", action="store_true", help="Use LDAPS (port 636)")
+
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
@@ -312,6 +321,61 @@ def main():
             )
             ldap_dumper = LDAPDumper(ldap_utils, db_path, args.overwrite)
             ldap_dumper.dump()
+
+    # Full pipeline: SYSVOL + LDAP + dump + analysis -> one zip
+    if args.command == "full":
+        if args.kerberos and is_ip(args.dc):
+            console.print("Kerberos authentication requires hostname of the DC instead of an IP")
+            sys.exit()
+
+        domain = args.domain.lower()
+        if "/" in args.username:
+            logon_domain, username = args.username.rsplit("/", 1)
+        else:
+            username, logon_domain = args.username, args.domain
+
+        lmhash, nthash = args.hashes.split(":") if args.hashes else ("", "")
+
+        sysvol_path, ldap_path = "gpos/sysvols", "gpos/ldap"
+
+        # SYSVOL
+        smb_utils = SMBUtils(
+            args.dc, logon_domain, username, args.password, lmhash, nthash, args.kerberos, args.aeskey
+        )
+        if not smb_utils.smbClient:
+            console.print("Failed to connect to the SMB server.")
+            return
+
+        SYSVOLDumper(smb_utils, None, None, None, False, False, sysvol_path).download()
+
+        # LDAP
+        db_path = Path(ldap_path) / f"{domain}.sqlite"
+        ldap_utils = LDAPUtils(
+            args.dc, args.domain, logon_domain, username, args.password,
+            lmhash, nthash, args.kerberos, args.aeskey, args.ldaps
+        )
+        LDAPDumper(ldap_utils, db_path, True).dump()
+
+        # Dump + analysis
+        core = GPOHoundCore(
+            list(policy_map.values()), ldap_path, sysvol_path,
+            args.neo4j_host, args.neo4j_user, args.neo4j_pass, args.neo4j_port
+        )
+        cli = GPOHoundCLI(core, True)
+
+        parsed_policies = cli.parse_policies(None, None, False)
+        output_analysis = core.analyse_all_gpos(None, None, None, False)
+
+        cli.save_bundle_zip(
+            {"dump.json": parsed_policies, "analysis.json": output_analysis},
+            args.output_dir,
+            args.zip_name,
+        )
+
+        if core.bloodhound.connection:
+            core.bloodhound.close()
+
+        return
 
     # Operation on GPOs
     elif args.command in ["dump", "analysis", "parse"]:
