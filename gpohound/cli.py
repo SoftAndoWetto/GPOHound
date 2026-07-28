@@ -1,3 +1,7 @@
+import json
+import zipfile
+from pathlib import Path
+
 from itertools import zip_longest
 
 from rich.console import Console
@@ -17,10 +21,26 @@ class GPOHoundCLI:
     Class for printing results to the CLI
     """
 
-    def __init__(self, gpohound_core, json_output=False):
-
+    def __init__(self, gpohound_core, json_output=False, output_dir=None, zip_name=None):
         self.gpohound_core = gpohound_core
         self.print_json = json_output
+        self.output_dir = output_dir
+        self.zip_name = zip_name
+
+    def save_json_zip(self, data, output_dir, zip_name, inner_filename="gpohound_output.json"):
+        """
+        Write data as JSON and package it into a zip file at output_dir/zip_name
+        """
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        zip_path = output_path / zip_name
+        json_bytes = json.dumps(data, indent=4, default=str).encode("utf-8")
+
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(inner_filename, json_bytes)
+
+        console.print(f"Output written to {zip_path}")
 
     def parse_gpo_file(self, file_path):
         """
@@ -74,7 +94,9 @@ class GPOHoundCLI:
         if not parsed_policies:
             return
 
-        if self.print_json:
+        if self.output_dir:
+            self.save_json_zip(parsed_policies, self.output_dir, self.zip_name, "dump.json")
+        elif self.print_json:
             console.print(JSON.from_data(parsed_policies, indent=4))
         else:
             self.print_dict_as_tree("GPOs", parsed_policies)
@@ -184,7 +206,9 @@ class GPOHoundCLI:
             console.print("No results were found for the specified settings...")
             return
 
-        if self.print_json:
+        if self.output_dir:
+            self.save_json_zip(output_analysis, self.output_dir, self.zip_name, "analysis.json")
+        elif self.print_json:
             console.print(JSON.from_data(output_analysis, indent=4))
         else:
             self.print_analysed(output_analysis)

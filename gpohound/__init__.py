@@ -143,6 +143,8 @@ def main():
         help="List non-empty affected OUs (user/computer counts by default, names in JSON output)",
     )
     dump_parser.add_argument("--json", action="store_true", help="Display results in JSON format")
+    dump_parser.add_argument("--output-dir", type=str, metavar="DIR", help="Write JSON output as a zip to this folder instead of printing")
+    dump_parser.add_argument("--zip-name", type=str, default="gpohound_dump.zip", help="Name of the output zip file (default: gpohound_dump.zip)")
     search_parser = dump.add_argument_group(title="Search")
     search_parser.add_argument("--search", help="Search for a regex pattern in key and value")
     search_parser.add_argument(
@@ -167,6 +169,8 @@ def main():
     )
     analysis_output = analysis.add_argument_group(title="Output options")
     analysis_output.add_argument("--json", action="store_true", help="Format output as JSON")
+    analysis_output.add_argument("--output-dir", type=str, metavar="DIR", help="Write JSON output as a zip to this folder instead of printing")
+    analysis_output.add_argument("--zip-name", type=str, default="gpohound_analysis.zip", help="Name of the output zip file (default: gpohound_analysis.zip)")
     analysis_parser = analysis.add_argument_group(title="Analysis Options")
     analysis_parser.add_argument(
         "--affected",
@@ -358,7 +362,7 @@ def main():
         )
 
         if args.command in ["dump", "analysis", "parse"]:
-            cli = GPOHoundCLI(core, args.json)
+            cli = GPOHoundCLI(core, args.json, getattr(args, "output_dir", None), getattr(args, "zip_name", None))
 
             # Parse one GPO file
             if args.command == "parse":
