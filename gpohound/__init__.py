@@ -145,6 +145,11 @@ def main():
     dump_parser.add_argument("--json", action="store_true", help="Display results in JSON format")
     dump_parser.add_argument("--output-dir", type=str, metavar="DIR", help="Write JSON output as a zip to this folder instead of printing")
     dump_parser.add_argument("--zip-name", type=str, default="gpohound_dump.zip", help="Name of the output zip file (default: gpohound_dump.zip)")
+    dump_parser.add_argument(
+        "--bloodhound",
+        action="store_true",
+        help="Write the zip in BloodHound CE v8+ OpenGraph ingest format instead of raw JSON",
+    )
     search_parser = dump.add_argument_group(title="Search")
     search_parser.add_argument("--search", help="Search for a regex pattern in key and value")
     search_parser.add_argument(
@@ -171,6 +176,11 @@ def main():
     analysis_output.add_argument("--json", action="store_true", help="Format output as JSON")
     analysis_output.add_argument("--output-dir", type=str, metavar="DIR", help="Write JSON output as a zip to this folder instead of printing")
     analysis_output.add_argument("--zip-name", type=str, default="gpohound_analysis.zip", help="Name of the output zip file (default: gpohound_analysis.zip)")
+    analysis_output.add_argument(
+        "--bloodhound",
+        action="store_true",
+        help="Write the zip in BloodHound CE v8+ OpenGraph ingest format instead of raw JSON",
+    )
     analysis_parser = analysis.add_argument_group(title="Analysis Options")
     analysis_parser.add_argument(
         "--affected",
@@ -231,6 +241,11 @@ def main():
     full.add_argument("--output-dir", type=str, default=".", metavar="DIR", help="Folder to write the zip to")
     full.add_argument("--zip-name", type=str, default="gpohound_full.zip", help="Name of the output zip file")
     full.add_argument("--ldaps", action="store_true", help="Use LDAPS (port 636)")
+    full.add_argument(
+        "--bloodhound",
+        action="store_true",
+        help="Write the zip in BloodHound CE v8+ OpenGraph ingest format instead of raw JSON",
+    )
 
     if len(sys.argv) == 1:
         parser.print_help()
@@ -366,11 +381,16 @@ def main():
         parsed_policies = cli.parse_policies(None, None, False)
         output_analysis = core.analyse_all_gpos(None, None, None, False)
 
-        cli.save_bundle_zip(
-            {"dump.json": parsed_policies, "analysis.json": output_analysis},
-            args.output_dir,
-            args.zip_name,
-        )
+        if getattr(args, "bloodhound", False):
+            nodes, edges = cli.build_bloodhound_graph(parsed_policies)
+            nodes, edges = cli.build_bloodhound_graph(output_analysis, nodes, edges)
+            cli.write_bloodhound_zip(nodes, edges, args.output_dir, args.zip_name)
+        else:
+            cli.save_bundle_zip(
+                {"dump.json": parsed_policies, "analysis.json": output_analysis},
+                args.output_dir,
+                args.zip_name,
+            )
 
         if core.bloodhound.connection:
             core.bloodhound.close()
@@ -426,7 +446,13 @@ def main():
         )
 
         if args.command in ["dump", "analysis", "parse"]:
-            cli = GPOHoundCLI(core, args.json, getattr(args, "output_dir", None), getattr(args, "zip_name", None))
+            cli = GPOHoundCLI(
+                core,
+                args.json,
+                getattr(args, "output_dir", None),
+                getattr(args, "zip_name", None),
+                getattr(args, "bloodhound", False),
+            )
 
             # Parse one GPO file
             if args.command == "parse":
