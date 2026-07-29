@@ -5,9 +5,9 @@ from rich.console import Console
 from gpohound.parser import GPOParser
 from gpohound.processor import GPOProcessor
 from gpohound.analyser import GPOAnalyser
-from gpohound.enricher import BloodHoundEnricher
 
 from gpohound.utils.bloodhound import BloodHoundConnector
+from gpohound.utils.opengraph import GPOHoundGraph
 from gpohound.utils.sqlite import SQLiteHandler
 from gpohound.utils.ad import ActiveDirectoryUtils
 
@@ -33,9 +33,9 @@ class GPOHoundCore:
 
         self.sysvol_path = sysvol_path
 
-        # BloodHound interactions
+        # BloodHound interactions (read-only; used to resolve trustees/OUs/
+        # computers, either live or via an offline LDAP dump)
         self.bloodhound = BloodHoundConnector(neo4j_host, neo4j_user, neo4j_password, neo4j_port)
-        self.bloodhound_enricher = BloodHoundEnricher(self.bloodhound)
 
         # LDAP SQLite interactions
         self.sqlite_handler = SQLiteHandler(ldap_path)
@@ -274,10 +274,15 @@ class GPOHoundCore:
 
     def enrich_bloodhound(self, ingestor, domains=None, guids=None, objects=None):
         """
-        Enrich BloodHound data
+        Build a BloodHound OpenGraph (nodes/edges) with the relationships and
+        properties GPOHound derived from the GPOs, ready to be exported as an
+        ingest zip. This no longer writes anything live into a BloodHound/
+        Neo4j database.
         """
 
-        output_enrichment = {}
+        graph = GPOHoundGraph(source_kind="GPOHound")
+        found_any = False
+
         parsed_policies = self.gpo_parser.parse_domains_policies(self.sysvol_path, self.ad_utils)
 
         if not parsed_policies:
@@ -310,8 +315,7 @@ class GPOHoundCore:
                         enrichment_data.append(data)
 
             if ingestor and domain_sid and enrichment_data:
-                output = self.bloodhound_enricher.enrich(enrichment_data, domain, domain_sid, ingestor)
-                if output:
-                    output_enrichment[domain] = output
+                graph.add_enrichment(enrichment_data, domain, domain_sid, self.ad_utils, ingestor)
+                found_any = True
 
-        return output_enrichment or None
+        return graph if found_any else None

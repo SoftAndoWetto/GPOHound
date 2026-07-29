@@ -190,12 +190,13 @@ def main():
     analysis_parser.add_argument(
         "--enrich",
         action="store_true",
-        help="Augment BloodHound data with additional relationships/properties",
+        help="Export additional relationships/properties derived from GPOs as a BloodHound OpenGraph ingest zip",
     )
     analysis_parser.add_argument(
         "--enrich-ce",
         action="store_true",
-        help="Same as --enrich, but persists the groups relationships on BloodHound-CE (takes longer to run)",
+        help="Same as --enrich, but models group memberships through synthetic ADLocalGroup nodes, "
+        "matching SharpHound CE's own local group collection style",
     )
     analysis_target_parser = analysis.add_argument_group(title="Target an object")
     analysis_target_parser.add_argument("--ou", metavar="ID/DN", help="Target OU (DN or object ID)")
@@ -382,9 +383,9 @@ def main():
         output_analysis = core.analyse_all_gpos(None, None, None, False)
 
         if getattr(args, "bloodhound", False):
-            nodes, edges = cli.build_bloodhound_graph(parsed_policies)
-            nodes, edges = cli.build_bloodhound_graph(output_analysis, nodes, edges)
-            cli.write_bloodhound_zip(nodes, edges, args.output_dir, args.zip_name)
+            graph = cli.build_bloodhound_opengraph(parsed_policies)
+            graph = cli.build_bloodhound_opengraph(output_analysis, graph)
+            cli.write_bloodhound_zip(graph, args.output_dir, args.zip_name)
         else:
             cli.save_bundle_zip(
                 {"dump.json": parsed_policies, "analysis.json": output_analysis},
@@ -477,18 +478,9 @@ def main():
 
             # Analyse GPO
             elif args.command == "analysis":
-                if args.enrich or args.enrich_ce:
-
-                    if not core.bloodhound.connection:
-                        console.print("This command requires a working BloodHound connection")
-                        return
-
-                    if not core.bloodhound.apoc:
-                        console.print("Enable the Neo4j APOC plugin: ", end="")
-                        console.print("'cp /var/lib/neo4j/labs/apoc-* /var/lib/neo4j/plugins/ && neo4j restart'")
-                        return
-
-                if args.affected and not (core.bloodhound.connection or core.sqlite_handler.dbs):
+                if (args.enrich or args.enrich_ce or args.affected) and not (
+                    core.bloodhound.connection or core.sqlite_handler.dbs
+                ):
                     console.print("This command requires a working BloodHound connection or an LDAP dump")
                     return
 

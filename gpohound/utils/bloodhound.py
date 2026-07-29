@@ -1,21 +1,30 @@
 import logging
 
 from neo4j import GraphDatabase
-from neo4j.exceptions import ServiceUnavailable, AuthError, CypherSyntaxError
+from neo4j.exceptions import ServiceUnavailable, AuthError
 
 logging.getLogger("neo4j").setLevel(logging.getLogger().getEffectiveLevel())
 
 
 class BloodHoundConnector:
     """
-    Class to interact with BloodHound data
+    Read-only client for an existing BloodHound Neo4j database.
+
+    GPOHound uses this purely as an (optional) data *source* to resolve
+    trustees, OUs, GPOs and computers, either live against Neo4j or, when no
+    connection is available, against an offline LDAP dump (see
+    gpohound.utils.sqlite.SQLiteHandler and gpohound.utils.ad.ActiveDirectoryUtils).
+
+    Writing GPOHound's findings back into BloodHound is handled separately by
+    gpohound.utils.opengraph.GPOHoundGraph, which produces a BloodHound
+    OpenGraph ingest zip instead of writing directly into the database. No
+    APOC plugin or write access is required here anymore.
     """
 
     def __init__(self, host=None, user=None, password=None, port=None):
         self.uri = f"bolt://{host}:{port}"
         self.user = user
         self.password = password
-        self.apoc = None
 
         try:
             # Create driver
@@ -27,14 +36,6 @@ class BloodHoundConnector:
                 self.connection = bool(self.query("RETURN 1"))
             except Exception as error:
                 logging.info(f"Failed to connect to the database: {error}")
-
-            self.apoc = False
-            if self.connection:
-                # Check if APOC is available
-                try:
-                    self.apoc = bool(self.query("RETURN apoc.version()"))
-                except CypherSyntaxError as error:
-                    logging.info(f"APOC plugin not available: {error}")
 
         except ServiceUnavailable as error:
             logging.debug(f"Unable to connect to Neo4j instance: {error}")
@@ -319,184 +320,3 @@ class BloodHoundConnector:
                 """
 
         return self.query(query, params)
-
-    def add_edge(self, domain_sid, trustee_sid, computer_objectid, edge):
-        """
-        Add a single edge between a trustee and a computer.
-        """
-
-        params = {
-            "trustee_sid": trustee_sid,
-            "domain_sid": domain_sid,
-            "computer_objectid": computer_objectid,
-            "edge": edge,
-        }
-
-        query = """
-                MATCH (t)
-                WHERE t.objectid IS NOT NULL
-                AND toUpper(t.objectid) = $trustee_sid
-                AND toUpper(t.domainsid) = $domain_sid
-                MATCH (c:Computer {objectid: $computer_objectid})
-                CALL apoc.merge.relationship(t, $edge, {gpohound:true}, {}, c) YIELD rel
-                RETURN t, c
-                """
-
-        return self.query(query, params)
-
-    def add_edges(self, domain_sid, ou_ids, trustee_sids, edge):
-        """
-        Add relationship between a trustee and machines from a OU
-        """
-        params = {
-            "edge": edge,
-            "ou_ids": ou_ids,
-            "trustee_sids": trustee_sids,
-            "domain_sid": domain_sid.upper(),
-        }
-
-        query = """
-                // Collect all computers from all ous
-                UNWIND $ou_ids AS ou_id
-                MATCH (o {objectid: ou_id})-[:Contains]->(c:Computer)
-                WITH collect(DISTINCT c) AS computers
-
-                // Match all trustees
-                MATCH (t)
-                WHERE t.objectid IS NOT NULL
-                AND ANY(sid IN $trustee_sids WHERE toUpper(t.objectid) ENDS WITH sid)
-                AND toUpper(t.domainsid) = $domain_sid
-                
-                // Merge relationships
-                UNWIND computers AS c
-                CALL apoc.merge.relationship(t, $edge, {gpohound: true}, {}, c) YIELD rel
-
-                RETURN t, c
-                """
-
-        outputs = self.query(query, params)
-
-        if outputs:
-            if isinstance(outputs, list):
-                return outputs
-            else:
-                return [outputs]
-        return None
-
-    def add_edge_bhce(self, domain_sid, trustee_sid, computer_objectid, group_sid, group_name):
-        """
-        Add a single trustee to a single computer's local group (BloodHound CE style).
-        """
-        trustee_sid = trustee_sid.upper()
-        domain_sid = domain_sid.upper()
-        group_name = group_name.upper()
-
-        params = {
-            "trustee_sid": trustee_sid,
-            "domain_sid": domain_sid,
-            "computer_objectid": computer_objectid,
-            "group_rid": group_sid.split("-")[-1],
-            "group_name": group_name,
-        }
-
-        query = """
-                // Match the trustee
-                MATCH (t)
-                WHERE t.objectid IS NOT NULL
-                AND toUpper(t.objectid) = $trustee_sid
-                AND toUpper(t.domainsid) = $domain_sid
-
-                // Match the computer
-                MATCH (c:Computer {objectid: $computer_objectid})
-
-                // Merge the local group
-                MERGE (g:ADLocalGroup {objectid: toUpper(c.objectid + '-' + $group_rid)})
-                ON CREATE SET g.name = $group_name + '@' + c.name
-
-                // Merge relationships
-                MERGE (t)-[:MemberOfLocalGroup]->(g)
-                MERGE (g)-[:LocalToComputer]->(c)
-
-                RETURN t, c
-                """
-
-        return self.query(query, params)
-
-    def add_edges_bhce(self, domain_sid, ou_ids, trustee_sids, group_sid, group_name):
-        """
-        Add relationships between a trustee, a local group and machines from a OU for BloodHound CE.
-        The naming follows SharpHound's convention: "GROUPNAME@COMPUTERNAME" in uppercase.
-        Each computer has its own local groups, with "objectid" values in the format: COMPUTER_SID-GROUP_RID
-        """
-
-        params = {
-            "ou_ids": ou_ids,
-            "trustee_sids": trustee_sids,
-            "domain_sid": domain_sid.upper(),
-            "group_rid": group_sid.split("-")[-1],
-            "group_name": group_name.upper(),
-        }
-
-        query = """
-                // Expand all ous and collect computers
-                UNWIND $ou_ids AS ou_id
-                MATCH (o {objectid: ou_id})-[:Contains]->(c:Computer)
-                WITH collect(DISTINCT c) AS computers
-
-                // Match all trustees
-                MATCH (t)
-                WHERE t.objectid IS NOT NULL
-                AND toUpper(t.objectid) IN $trustee_sids
-                AND toUpper(t.domainsid) = $domain_sid
-                UNWIND computers AS c
-                WITH t, c
-
-                // Local group per computer
-                WITH t, c, toUpper(c.objectid + '-' + $group_rid) AS local_group_id
-                MERGE (g:ADLocalGroup {objectid: local_group_id})
-                ON CREATE SET g.name = $group_name + '@' + c.name
-                WITH t, g, c
-                
-                // Relationships
-                CALL apoc.merge.relationship(t, 'MemberOfLocalGroup', {}, {}, g) YIELD rel AS rel1
-                CALL apoc.merge.relationship(g, 'LocalToComputer', {}, {}, c) YIELD rel AS rel2
-
-                RETURN t, c
-                """
-        outputs = self.query(query, params)
-
-        if outputs:
-            if isinstance(outputs, list):
-                return outputs
-            else:
-                return [outputs]
-        return None
-
-    def add_extra_property(self, ou_ids, property_key, property_value):
-        """
-        Add property to a machine in a ou
-        """
-
-        params = {
-            "ou_ids": ou_ids,
-            "property_key": property_key,
-            "property_value": property_value,
-        }
-
-        query = """
-                UNWIND $ou_ids AS ou_id
-                MATCH (o {objectid: ou_id})-[:Contains]->(c:Computer)
-                WITH c
-                CALL apoc.create.setProperty(c, $property_key, $property_value)
-                YIELD node AS n
-                RETURN n
-                """
-
-        outputs = self.query(query, params)
-
-        if outputs:
-            if isinstance(outputs, list):
-                return outputs
-            else:
-                return [outputs]
-        return None

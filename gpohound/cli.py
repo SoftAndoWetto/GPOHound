@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.console import Console
 
 from gpohound.utils.utils import search_keys_values
+from gpohound.utils.opengraph import GPOHoundGraph
 
 
 console = Console(highlight=False)
@@ -59,188 +60,36 @@ class GPOHoundCLI:
 
         console.print(f"Output written to {zip_path}")
 
-    def _sanitize_property(self, value):
-        """
-        Recursively coerce a value into something BloodHound CE's OpenGraph
-        ingest accepts as a node property: string, number, bool, or a
-        homogeneous array of strings/numbers. Nested dict/list structures are
-        flattened to a JSON string as a last resort so nothing is silently lost.
-        """
-
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-
-        if isinstance(value, list):
-            # Only keep the list as-is if every element is already a scalar
-            if all(isinstance(item, (str, int, float, bool)) or item is None for item in value):
-                return value
-            return json.dumps(value, default=str)
-
-        if isinstance(value, dict):
-            return json.dumps(value, default=str)
-
-        return str(value)
-
-    def _flatten_findings(self, node, gpo_props, findings):
-        """
-        Walk an analysis/dump sub-tree looking for the "analysis" /
-        "bloodhound_property" pattern used by every GPOHound analyser
-        (Registry, Privilege Rights, Memberships, GPP Password, ...) and
-        pull that information into flat GPO node properties instead of the
-        nested objects BloodHound CE rejects.
-        """
-
-        if isinstance(node, dict):
-            if "analysis" in node and node.get("analysis"):
-                finding = str(node["analysis"])
-                regkey = node.get("regkey")
-                if regkey:
-                    finding = f"{finding} ({regkey})"
-                findings.append(finding)
-
-                bh_property = node.get("bloodhound_property")
-                if isinstance(bh_property, dict):
-                    for key, value in bh_property.items():
-                        if key:
-                            gpo_props[str(key)] = self._sanitize_property(value)
-                elif bh_property:
-                    # Some analysers only set a property name; use "analysis" as the value
-                    gpo_props[str(bh_property)] = self._sanitize_property(node.get("value", True))
-
-            for key, value in node.items():
-                if key in ("analysis", "bloodhound_property", "references"):
-                    continue
-                self._flatten_findings(value, gpo_props, findings)
-
-        elif isinstance(node, list):
-            for item in node:
-                self._flatten_findings(item, gpo_props, findings)
-
-    def build_bloodhound_graph(self, data, nodes=None, edges=None):
+    def build_bloodhound_opengraph(self, data, graph=None):
         """
         Convert GPOHound "dump"/"analysis" output (nested {domain: {guid: {...}}})
-        into OpenGraph nodes/edges. Accepts existing `nodes` (dict keyed by id)
-        and `edges` (list) so multiple datasets (e.g. dump + analysis) can be
-        merged into a single graph.
+        into a bhopengraph-backed GPOHoundGraph. Accepts an existing `graph`
+        so multiple datasets (e.g. dump + analysis) can be merged into one
+        before being exported.
         """
 
-        if nodes is None:
-            nodes = {}
-        if edges is None:
-            edges = []
+        if graph is None:
+            graph = GPOHoundGraph(source_kind="GPOHound")
 
-        def add_node(node_id, kind, properties):
-            existing = nodes.get(node_id)
-            if existing:
-                existing["properties"].update({k: v for k, v in properties.items() if v is not None})
-            else:
-                nodes[node_id] = {
-                    "id": node_id,
-                    "kinds": [kind],
-                    "properties": {k: v for k, v in properties.items() if v is not None},
-                }
+        graph.add_gpo_dump_data(data)
+        return graph
 
-        for domain, gpos in (data or {}).items():
-            domain_id = f"DOMAIN:{domain}"
-            add_node(domain_id, "Domain", {"name": domain})
-
-            if not isinstance(gpos, dict):
-                continue
-
-            for gpo_guid, gpo_info in gpos.items():
-                if not isinstance(gpo_info, dict):
-                    continue
-
-                gpo_id = f"{gpo_guid}@{domain}"
-                gpo_props = {
-                    "name": gpo_info.get("GPO Name", gpo_guid),
-                    "guid": gpo_guid,
-                    "domain": domain,
-                }
-
-                findings = []
-                affected_ous = gpo_info.get("Affected OUs")
-
-                for key, value in gpo_info.items():
-                    if key in ("GPO Name", "Affected OUs"):
-                        continue
-                    self._flatten_findings(value, gpo_props, findings)
-
-                if findings:
-                    gpo_props["findings"] = findings
-
-                add_node(gpo_id, "GPO", gpo_props)
-
-                if isinstance(affected_ous, dict) and affected_ous:
-                    for ou_dn, ou_info in affected_ous.items():
-                        ou_id = f"OU:{ou_dn}"
-                        ou_props = {"name": ou_dn, "distinguishedname": ou_dn}
-                        if isinstance(ou_info, dict):
-                            for extra_key, extra_value in ou_info.items():
-                                ou_props[f"affected_{extra_key}".lower()] = self._sanitize_property(extra_value)
-
-                        add_node(ou_id, "OU", ou_props)
-                        edges.append(
-                            {
-                                "kind": "GPOAppliesTo",
-                                "start": {"match_by": "id", "value": gpo_id},
-                                "end": {"match_by": "id", "value": ou_id},
-                            }
-                        )
-                else:
-                    # Fall back to linking the GPO directly to its domain when
-                    # no OU-level impact data is available
-                    edges.append(
-                        {
-                            "kind": "GPOAppliesTo",
-                            "start": {"match_by": "id", "value": gpo_id},
-                            "end": {"match_by": "id", "value": domain_id},
-                        }
-                    )
-
-        return nodes, edges
-
-    def write_bloodhound_zip(self, nodes, edges, output_dir, zip_name):
+    def write_bloodhound_zip(self, graph, output_dir, zip_name):
         """
-        Write a nodes dict (keyed by id) and edges list to a BloodHound CE v8+
-        OpenGraph ingest zip: {"metadata": {...}, "graph": {"nodes": [...], "edges": [...]}}
+        Export a GPOHoundGraph to a BloodHound CE v8+ OpenGraph ingest zip.
         """
 
-        node_list = list(nodes.values())
-
-        ingest_payload = {
-            "metadata": {
-                "source_kind": "GPOHound",
-                "version": 1,
-                "count": {"nodes": len(node_list), "edges": len(edges)},
-            },
-            "graph": {
-                "nodes": node_list,
-                "edges": edges,
-            },
-        }
-
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        if not zip_name.endswith(".zip"):
-            zip_name += ".zip"
-
-        zip_path = output_path / zip_name
-
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("gpohound_data.json", json.dumps(ingest_payload, indent=2, default=str))
-
+        zip_path = graph.export_zip(output_dir, zip_name, inner_filename="gpohound_data.json")
         console.print(f"BloodHound OpenGraph output written to {zip_path}")
 
     def save_bloodhound_zip(self, data, output_dir, zip_name):
         """
-        Convenience wrapper: build the OpenGraph nodes/edges for a single
-        dataset and write it straight to a zip.
+        Convenience wrapper: build the OpenGraph for a single dataset and
+        write it straight to a zip.
         """
 
-        nodes, edges = self.build_bloodhound_graph(data)
-        self.write_bloodhound_zip(nodes, edges, output_dir, zip_name)
+        graph = self.build_bloodhound_opengraph(data)
+        self.write_bloodhound_zip(graph, output_dir, zip_name)
 
     def parse_gpo_file(self, file_path):
         """
@@ -421,12 +270,26 @@ class GPOHoundCLI:
 
     def enrich_bh(self, ingestor, domains=None, guids=None):
         """
-        Enrich BloodHound data and print results
+        Build the BloodHound OpenGraph enrichment data (relationships and
+        properties derived from GPOs), write it to a zip, and print a summary.
         """
 
-        enrichment_output = self.gpohound_core.enrich_bloodhound(ingestor, domains, guids)
-        if not enrichment_output:
+        graph = self.gpohound_core.enrich_bloodhound(ingestor, domains, guids)
+        if not graph or not (graph.node_count or graph.edge_count):
             console.print("Empty enrichment results...")
+            return
+
+        output_dir = self.output_dir or "."
+        # analysis_output's --zip-name defaults to "gpohound_analysis.zip" for
+        # the dump/analysis commands; give enrichment its own default unless
+        # the user explicitly picked a name.
+        zip_name = self.zip_name if self.zip_name and self.zip_name != "gpohound_analysis.zip" else "gpohound_enrich.zip"
+
+        zip_path = graph.export_zip(output_dir, zip_name, inner_filename="gpohound_enrich.json")
+        console.print(f"BloodHound OpenGraph enrichment written to {zip_path}")
+
+        enrichment_output = graph.get_summary()
+        if not enrichment_output:
             return
 
         if self.print_json:
@@ -689,9 +552,15 @@ class GPOHoundCLI:
                         properties_table.add_column("Value", ratio=5, justify="center")
                         properties_table.add_column("Number of computers", ratio=4, justify="center")
 
-                        sorted_properties = dict(sorted(value.items(), key=lambda item: len(item[1]), reverse=True))
-                        for property, machines in sorted_properties.items():
-                            properties_table.add_row(property[0], str(property[1]), str(len(machines)))
+                        rows = [
+                            (prop_key, prop_value, machines)
+                            for prop_key, prop_values in value.items()
+                            for prop_value, machines in prop_values.items()
+                        ]
+                        rows.sort(key=lambda row: len(row[2]), reverse=True)
+
+                        for prop_key, prop_value, machines in rows:
+                            properties_table.add_row(prop_key, str(prop_value), str(len(machines)))
 
                         properties_node = parent.add("[bold blue]Properties [/bold blue]").add(
                             "[bold]Interesting properties added to computers [/bold]"
