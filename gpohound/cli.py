@@ -280,10 +280,7 @@ class GPOHoundCLI:
             return
 
         output_dir = self.output_dir or "."
-        # analysis_output's --zip-name defaults to "gpohound_analysis.zip" for
-        # the dump/analysis commands; give enrichment its own default unless
-        # the user explicitly picked a name.
-        zip_name = self.zip_name if self.zip_name and self.zip_name != "gpohound_analysis.zip" else "gpohound_enrich.zip"
+        zip_name = self.zip_name or "gpohound_enrich.zip"
 
         zip_path = graph.export_zip(output_dir, zip_name, inner_filename="gpohound_enrich.json")
         console.print(f"BloodHound OpenGraph enrichment written to {zip_path}")

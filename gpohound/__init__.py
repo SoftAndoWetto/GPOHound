@@ -4,6 +4,7 @@ import argparse
 import sys
 import logging
 from pathlib import Path
+from datetime import date
 
 from gpohound.utils.utils import load_yaml_config, is_ip
 from gpohound.protocols.smb import SMBUtils
@@ -19,6 +20,15 @@ from platformdirs import user_config_dir
 
 
 console = Console(highlight=False)
+
+
+def default_zip_name(suffix=""):
+    """
+    Today's date-prefixed default output filename, e.g. 20260729_GPOHound.zip
+    or 20260729_GPOHound_analysis.zip.
+    """
+
+    return f"{date.today():%Y%m%d}_GPOHound{suffix}.zip"
 
 
 def main():
@@ -144,11 +154,13 @@ def main():
     )
     dump_parser.add_argument("--json", action="store_true", help="Display results in JSON format")
     dump_parser.add_argument("--output-dir", type=str, metavar="DIR", help="Write JSON output as a zip to this folder instead of printing")
-    dump_parser.add_argument("--zip-name", type=str, default="gpohound_dump.zip", help="Name of the output zip file (default: gpohound_dump.zip)")
+    dump_parser.add_argument("--zip-name", type=str, default=default_zip_name("_dump"), help="Name of the output zip file (default: YYYYMMDD_GPOHound_dump.zip)")
     dump_parser.add_argument(
-        "--bloodhound",
-        action="store_true",
-        help="Write the zip in BloodHound CE v8+ OpenGraph ingest format instead of raw JSON",
+        "--raw",
+        action="store_false",
+        dest="bloodhound",
+        default=True,
+        help="Write the zip as raw JSON instead of BloodHound CE v8+ OpenGraph ingest format",
     )
     search_parser = dump.add_argument_group(title="Search")
     search_parser.add_argument("--search", help="Search for a regex pattern in key and value")
@@ -175,11 +187,13 @@ def main():
     analysis_output = analysis.add_argument_group(title="Output options")
     analysis_output.add_argument("--json", action="store_true", help="Format output as JSON")
     analysis_output.add_argument("--output-dir", type=str, metavar="DIR", help="Write JSON output as a zip to this folder instead of printing")
-    analysis_output.add_argument("--zip-name", type=str, default="gpohound_analysis.zip", help="Name of the output zip file (default: gpohound_analysis.zip)")
+    analysis_output.add_argument("--zip-name", type=str, default=default_zip_name("_analysis"), help="Name of the output zip file (default: YYYYMMDD_GPOHound_analysis.zip)")
     analysis_output.add_argument(
-        "--bloodhound",
-        action="store_true",
-        help="Write the zip in BloodHound CE v8+ OpenGraph ingest format instead of raw JSON",
+        "--raw",
+        action="store_false",
+        dest="bloodhound",
+        default=True,
+        help="Write the zip as raw JSON instead of BloodHound CE v8+ OpenGraph ingest format",
     )
     analysis_parser = analysis.add_argument_group(title="Analysis Options")
     analysis_parser.add_argument(
@@ -239,13 +253,15 @@ def main():
         "full", parents=[verbosity_parent, auth_parent],
         help="Download SYSVOL+LDAP, dump and analyse, and zip it all into one file"
     )
-    full.add_argument("--output-dir", type=str, default=".", metavar="DIR", help="Folder to write the zip to")
-    full.add_argument("--zip-name", type=str, default="gpohound_full.zip", help="Name of the output zip file")
+    full.add_argument("--output-dir", type=str, default=".", metavar="DIR", help="Folder to write the zip to (default: current directory)")
+    full.add_argument("--zip-name", type=str, default=default_zip_name(), help="Name of the output zip file (default: YYYYMMDD_GPOHound.zip)")
     full.add_argument("--ldaps", action="store_true", help="Use LDAPS (port 636)")
     full.add_argument(
-        "--bloodhound",
-        action="store_true",
-        help="Write the zip in BloodHound CE v8+ OpenGraph ingest format instead of raw JSON",
+        "--raw",
+        action="store_false",
+        dest="bloodhound",
+        default=True,
+        help="Write the zip as raw JSON instead of BloodHound CE v8+ OpenGraph ingest format",
     )
 
     if len(sys.argv) == 1:
@@ -487,6 +503,8 @@ def main():
                 # Enrich Bloodhound data
                 if args.enrich_ce or args.enrich:
                     ingestor = "bh-ce" if args.enrich_ce else "bh-legacy"
+                    if cli.zip_name == default_zip_name("_analysis"):
+                        cli.zip_name = default_zip_name("_enrich")
                     cli.enrich_bh(ingestor, domains, guids)
 
                 # Target a specific OU or trustee
